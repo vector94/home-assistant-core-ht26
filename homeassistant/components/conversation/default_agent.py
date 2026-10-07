@@ -654,7 +654,7 @@ class DefaultAgent(ConversationEntity):
         except intent.MatchFailedError as match_error:
             # Intent was valid, but no entities matched the constraints.
             error_response_type, error_response_args = _get_match_error_response(
-                self.hass, match_error
+                match_error
             )
             intent_response = _make_error_result(
                 language,
@@ -1760,7 +1760,6 @@ def _get_unmatched_response(result: RecognizeResult) -> tuple[ErrorKey, dict[str
 
 
 def _get_match_error_response(
-    hass: HomeAssistant,
     match_error: intent.MatchFailedError,
 ) -> tuple[ErrorKey, dict[str, Any]]:
     """Return key and template arguments for error when target matching fails."""
