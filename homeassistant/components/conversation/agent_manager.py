@@ -91,31 +91,42 @@ async def async_converse(
     if agent_id is None:
         agent_id = HOME_ASSISTANT_AGENT
 
+    if language is None:
+        language = hass.config.language
+
+    return await async_converse_input(
+        hass,
+        ConversationInput(
+            text=text,
+            context=context,
+            conversation_id=conversation_id,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            language=language,
+            agent_id=agent_id,
+            extra_system_prompt=extra_system_prompt,
+        ),
+    )
+
+
+async def async_converse_input(
+    hass: HomeAssistant, conversation_input: ConversationInput
+) -> ConversationResult:
+    """Process a conversation input and get intent."""
+    agent_id = conversation_input.agent_id
     agent = async_get_agent(hass, agent_id)
 
     if agent is None:
         raise ValueError(f"Agent {agent_id} not found")
 
     if isinstance(agent, ConversationEntity):
-        agent.async_set_context(context)
+        agent.async_set_context(conversation_input.context)
         method = agent.internal_async_process
     else:
         method = agent.async_process
 
-    if language is None:
-        language = hass.config.language
-
-    _LOGGER.debug("Processing in %s: %s", language, text)
-    conversation_input = ConversationInput(
-        text=text,
-        context=context,
-        conversation_id=conversation_id,
-        device_id=device_id,
-        satellite_id=satellite_id,
-        language=language,
-        agent_id=agent_id,
-        extra_system_prompt=extra_system_prompt,
-    )
+    language = conversation_input.language
+    _LOGGER.debug("Processing in %s: %s", language, conversation_input.text)
     with async_conversation_trace() as trace:
         trace.add_event(
             ConversationTraceEvent(
@@ -133,7 +144,7 @@ async def async_converse(
             )
             result = ConversationResult(
                 response=intent_response,
-                conversation_id=conversation_id,
+                conversation_id=conversation_input.conversation_id,
             )
 
         trace.set_result(**result.as_dict())

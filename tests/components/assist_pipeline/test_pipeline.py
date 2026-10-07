@@ -1105,12 +1105,12 @@ async def test_sentence_trigger_overrides_conversation_agent(
         await pipeline_input.validate()
 
     with patch(
-        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse"
-    ) as mock_async_converse:
+        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse_input"
+    ) as mock_async_converse_input:
         await pipeline_input.execute()
 
         # Sentence trigger should have been handled
-        mock_async_converse.assert_not_called()
+        mock_async_converse_input.assert_not_called()
 
         # Verify sentence trigger response
         intent_end_event = next(
@@ -1188,12 +1188,12 @@ async def test_prefer_local_intents(
         await pipeline_input.validate()
 
     with patch(
-        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse"
-    ) as mock_async_converse:
+        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse_input"
+    ) as mock_async_converse_input:
         await pipeline_input.execute()
 
         # Test agent should not have been called
-        mock_async_converse.assert_not_called()
+        mock_async_converse_input.assert_not_called()
 
         # Verify local intent response
         intent_end_event = next(
@@ -1260,16 +1260,16 @@ async def test_intent_continue_conversation(
     response.async_set_speech("For how long?")
 
     with patch(
-        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse",
+        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse_input",
         return_value=conversation.ConversationResult(
             response=response,
             conversation_id=mock_chat_session.conversation_id,
             continue_conversation=True,
         ),
-    ) as mock_async_converse:
+    ) as mock_async_converse_input:
         await pipeline_input.execute()
 
-        mock_async_converse.assert_called()
+        mock_async_converse_input.assert_called()
 
     results = [
         event.data
@@ -1338,15 +1338,15 @@ async def test_intent_continue_conversation(
     response.async_set_speech("Timer set for 20 minutes")
 
     with patch(
-        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse",
+        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse_input",
         return_value=conversation.ConversationResult(
             response=response,
             conversation_id=mock_chat_session.conversation_id,
         ),
-    ) as mock_async_converse:
+    ) as mock_async_converse_input:
         await pipeline_input.execute()
 
-        mock_async_converse.assert_called()
+        mock_async_converse_input.assert_called()
 
     # Snapshot will show it was still handled by the test agent and not default agent
     results = [
@@ -1410,11 +1410,11 @@ async def test_stt_language_used_instead_of_conversation_language(
     await pipeline_input.validate()
 
     with patch(
-        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse",
+        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse_input",
         return_value=conversation.ConversationResult(
             intent.IntentResponse(pipeline.language)
         ),
-    ) as mock_async_converse:
+    ) as mock_async_converse_input:
         await pipeline_input.execute()
 
         # Check intent start event
@@ -1430,10 +1430,10 @@ async def test_stt_language_used_instead_of_conversation_language(
         # STT language (en-US) should be used instead of '*'
         assert intent_start.data.get("language") == pipeline.stt_language
 
-        # Check input to async_converse
-        mock_async_converse.assert_called_once()
+        # Check input to async_converse_input
+        mock_async_converse_input.assert_called_once()
         assert (
-            mock_async_converse.call_args_list[0].kwargs.get("language")
+            mock_async_converse_input.call_args_list[0].args[1].language
             == pipeline.stt_language
         )
 
@@ -1486,11 +1486,11 @@ async def test_tts_language_used_instead_of_conversation_language(
     await pipeline_input.validate()
 
     with patch(
-        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse",
+        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse_input",
         return_value=conversation.ConversationResult(
             intent.IntentResponse(pipeline.language)
         ),
-    ) as mock_async_converse:
+    ) as mock_async_converse_input:
         await pipeline_input.execute()
 
         # Check intent start event
@@ -1506,10 +1506,10 @@ async def test_tts_language_used_instead_of_conversation_language(
         # STT language (en-US) should be used instead of '*'
         assert intent_start.data.get("language") == pipeline.tts_language
 
-        # Check input to async_converse
-        mock_async_converse.assert_called_once()
+        # Check input to async_converse_input
+        mock_async_converse_input.assert_called_once()
         assert (
-            mock_async_converse.call_args_list[0].kwargs.get("language")
+            mock_async_converse_input.call_args_list[0].args[1].language
             == pipeline.tts_language
         )
 
@@ -1562,11 +1562,11 @@ async def test_pipeline_language_used_instead_of_conversation_language(
     await pipeline_input.validate()
 
     with patch(
-        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse",
+        "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse_input",
         return_value=conversation.ConversationResult(
             intent.IntentResponse(pipeline.language)
         ),
-    ) as mock_async_converse:
+    ) as mock_async_converse_input:
         await pipeline_input.execute()
 
         # Check intent start event
@@ -1582,10 +1582,10 @@ async def test_pipeline_language_used_instead_of_conversation_language(
         # STT language (en-US) should be used instead of '*'
         assert intent_start.data.get("language") == pipeline.language
 
-        # Check input to async_converse
-        mock_async_converse.assert_called_once()
+        # Check input to async_converse_input
+        mock_async_converse_input.assert_called_once()
         assert (
-            mock_async_converse.call_args_list[0].kwargs.get("language")
+            mock_async_converse_input.call_args_list[0].args[1].language
             == pipeline.language
         )
 
@@ -1757,28 +1757,10 @@ async def test_chat_log_tts_streaming(
     ):
         await pipeline_input.validate()
 
-    async def mock_converse(
-        hass: HomeAssistant,
-        text: str,
-        conversation_id: str | None,
-        context: Context,
-        language: str | None = None,
-        agent_id: str | None = None,
-        device_id: str | None = None,
-        satellite_id: str | None = None,
-        extra_system_prompt: str | None = None,
+    async def mock_converse_input(
+        hass: HomeAssistant, conversation_input: conversation.ConversationInput
     ):
         """Mock converse."""
-        conversation_input = conversation.ConversationInput(
-            text=text,
-            context=context,
-            conversation_id=conversation_id,
-            device_id=device_id,
-            satellite_id=satellite_id,
-            language=language,
-            agent_id=agent_id,
-            extra_system_prompt=extra_system_prompt,
-        )
 
         async def stream_llm_response():
             for deltas in to_stream_deltas:
@@ -1790,7 +1772,9 @@ async def test_chat_log_tts_streaming(
                         yield {"content": chunk}
 
         with (
-            chat_session.async_get_chat_session(hass, conversation_id) as session,
+            chat_session.async_get_chat_session(
+                hass, conversation_input.conversation_id
+            ) as session,
             conversation.async_get_chat_log(
                 hass,
                 session,
@@ -1804,10 +1788,10 @@ async def test_chat_log_tts_streaming(
                 user_extra_system_prompt=conversation_input.extra_system_prompt,
             )
             async for _content in chat_log.async_add_delta_content_stream(
-                agent_id, stream_llm_response()
+                conversation_input.agent_id, stream_llm_response()
             ):
                 pass
-            intent_response = intent.IntentResponse(language)
+            intent_response = intent.IntentResponse(conversation_input.language)
             intent_response.async_set_speech("".join(to_stream_deltas[-1]))
             return conversation.ConversationResult(
                 response=intent_response,
@@ -1828,8 +1812,8 @@ async def test_chat_log_tts_streaming(
             return_value=LLMTools(tools=[mock_tool]),
         ),
         patch(
-            "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse",
-            mock_converse,
+            "homeassistant.components.assist_pipeline.pipeline.conversation.async_converse_input",
+            mock_converse_input,
         ),
     ):
         await pipeline_input.execute()
@@ -2191,8 +2175,9 @@ async def test_acknowledge_other_agents(
             "homeassistant.components.assist_pipeline.PipelineRun.text_to_speech"
         ) as text_to_speech,
         patch(
-            "homeassistant.components.conversation.async_converse", return_value=None
-        ) as async_converse,
+            "homeassistant.components.conversation.async_converse_input",
+            return_value=None,
+        ) as async_converse_input,
         patch(
             "homeassistant.components.assist_pipeline.PipelineRun._get_all_targets_in_satellite_area"
         ) as get_all_targets_in_satellite_area,
@@ -2214,7 +2199,7 @@ async def test_acknowledge_other_agents(
         await pipeline_input.execute()
 
         # Processed locally
-        async_converse.assert_not_called()
+        async_converse_input.assert_not_called()
 
         # Not processed locally
         text_to_speech.reset_mock()
@@ -2239,7 +2224,7 @@ async def test_acknowledge_other_agents(
         # The acknowledgment should not have even been checked for because the
         # default agent didn't handle the intent.
         text_to_speech.assert_not_called()
-        async_converse.assert_called_once()
+        async_converse_input.assert_called_once()
         get_all_targets_in_satellite_area.assert_not_called()
 
 

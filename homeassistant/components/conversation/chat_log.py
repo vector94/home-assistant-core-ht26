@@ -331,6 +331,42 @@ class ToolResultContentDeltaDict(TypedDict, total=False):
 
 
 @dataclass
+class _PendingAssistantMessage:
+    """Assistant message that is still being received from a stream."""
+
+    content: str = ""
+    thinking_content: str = ""
+    native: Any = None
+    tool_calls: list[llm.ToolInput] = field(default_factory=list)
+
+    @classmethod
+    def from_delta(cls, delta: AssistantContentDeltaDict) -> _PendingAssistantMessage:
+        """Start a message from a delta with the assistant role."""
+        return cls(
+            content=delta.get("content") or "",
+            thinking_content=delta.get("thinking_content") or "",
+            native=delta.get("native"),
+            tool_calls=delta.get("tool_calls") or [],
+        )
+
+    def has_content(self) -> bool:
+        """Return True if the message has something to add to the chat log."""
+        return bool(
+            self.content or self.thinking_content or self.tool_calls or self.native
+        )
+
+    def as_content(self, agent_id: str) -> AssistantContent:
+        """Return the message as content for the chat log."""
+        return AssistantContent(
+            agent_id=agent_id,
+            content=self.content or None,
+            thinking_content=self.thinking_content or None,
+            tool_calls=self.tool_calls or None,
+            native=self.native,
+        )
+
+
+@dataclass
 class ChatLog:
     """Class holding the chat history of a specific conversation."""
 
@@ -501,10 +537,7 @@ class ChatLog:
         The keys content and tool_calls will be concatenated
         if they appear multiple times.
         """
-        current_content = ""
-        current_thinking_content = ""
-        current_native: Any = None
-        current_tool_calls: list[llm.ToolInput] = []
+        message = _PendingAssistantMessage()
         tool_call_tasks: dict[str, asyncio.Task] = {}
 
         async for delta in stream:
@@ -513,77 +546,23 @@ class ChatLog:
             # Indicates update to current message
             if "role" not in delta:
                 # ToolResultContentDeltaDict will always have a role
-                assistant_delta = cast(AssistantContentDeltaDict, delta)
-                if delta_content := assistant_delta.get("content"):
-                    current_content += delta_content
-                if delta_thinking_content := assistant_delta.get("thinking_content"):
-                    current_thinking_content += delta_thinking_content
-                if delta_native := assistant_delta.get("native"):
-                    if current_native is not None:
-                        raise RuntimeError(
-                            "Native content already set, cannot overwrite"
-                        )
-                    current_native = delta_native
-                if delta_tool_calls := assistant_delta.get("tool_calls"):
-                    current_tool_calls += delta_tool_calls
-
-                    # Start processing the tool calls as soon as we know about them
-                    for tool_call in delta_tool_calls:
-                        if not tool_call.external:
-                            if self.llm_api is None:
-                                raise ValueError("No LLM API configured")
-
-                            tool_call_tasks[tool_call.id] = self.hass.async_create_task(
-                                self.llm_api.async_call_tool(tool_call),
-                                name=f"llm_tool_{tool_call.id}",
-                            )
-                if self.delta_listener:
-                    if filtered_delta := {
-                        k: v for k, v in assistant_delta.items() if k != "native"
-                    }:
-                        # We do not want to send the native content to the listener
-                        # as it is not JSON serializable
-                        self.delta_listener(self, filtered_delta)
+                self._add_assistant_delta(
+                    message, cast(AssistantContentDeltaDict, delta), tool_call_tasks
+                )
                 continue
 
             # Starting a new message
             # Yield the previous message if it has content
-            if (
-                current_content
-                or current_thinking_content
-                or current_tool_calls
-                or current_native
-            ):
-                content: AssistantContent | ToolResultContent = AssistantContent(
-                    agent_id=agent_id,
-                    content=current_content or None,
-                    thinking_content=current_thinking_content or None,
-                    tool_calls=current_tool_calls or None,
-                    native=current_native,
-                )
-                yield content
-                async for tool_result in self.async_add_assistant_content(
-                    content, tool_call_tasks=tool_call_tasks
+            if message.has_content():
+                async for content in self._async_add_pending_message(
+                    agent_id, message, tool_call_tasks
                 ):
-                    yield tool_result
-                    if self.delta_listener:
-                        self.delta_listener(self, asdict(tool_result))
-                current_content = ""
-                current_thinking_content = ""
-                current_native = None
-                current_tool_calls = []
+                    yield content
+                message = _PendingAssistantMessage()
 
             if delta["role"] == "assistant":
-                current_content = delta.get("content") or ""
-                current_thinking_content = delta.get("thinking_content") or ""
-                current_tool_calls = delta.get("tool_calls") or []
-                current_native = delta.get("native")
-
-                if self.delta_listener:
-                    if filtered_delta := {
-                        k: v for k, v in delta.items() if k != "native"
-                    }:
-                        self.delta_listener(self, filtered_delta)
+                message = _PendingAssistantMessage.from_delta(delta)
+                self._send_delta_to_listener(delta)
             elif delta["role"] == "tool_result":
                 content = ToolResultContent(
                     agent_id=agent_id,
@@ -592,35 +571,87 @@ class ChatLog:
                     tool_result=delta["tool_result"],
                 )
                 yield content
-                if self.delta_listener:
-                    self.delta_listener(self, asdict(content))
-                self.async_add_assistant_content_without_tools(content)
+                self._add_tool_result(content)
             else:
                 raise ValueError(
                     "Only assistant and tool_result roles expected."
                     f" Got {delta['role']}"
                 )
 
-        if (
-            current_content
-            or current_thinking_content
-            or current_tool_calls
-            or current_native
-        ):
-            content = AssistantContent(
-                agent_id=agent_id,
-                content=current_content or None,
-                thinking_content=current_thinking_content or None,
-                tool_calls=current_tool_calls or None,
-                native=current_native,
-            )
-            yield content
-            async for tool_result in self.async_add_assistant_content(
-                content, tool_call_tasks=tool_call_tasks
+        if message.has_content():
+            async for content in self._async_add_pending_message(
+                agent_id, message, tool_call_tasks
             ):
-                yield tool_result
-                if self.delta_listener:
-                    self.delta_listener(self, asdict(tool_result))
+                yield content
+
+    def _add_assistant_delta(
+        self,
+        message: _PendingAssistantMessage,
+        delta: AssistantContentDeltaDict,
+        tool_call_tasks: dict[str, asyncio.Task],
+    ) -> None:
+        """Add a delta without a role to the message that is being received."""
+        if delta_content := delta.get("content"):
+            message.content += delta_content
+        if delta_thinking_content := delta.get("thinking_content"):
+            message.thinking_content += delta_thinking_content
+        if delta_native := delta.get("native"):
+            if message.native is not None:
+                raise RuntimeError("Native content already set, cannot overwrite")
+            message.native = delta_native
+        if delta_tool_calls := delta.get("tool_calls"):
+            message.tool_calls += delta_tool_calls
+            # Start processing the tool calls as soon as we know about them
+            self._start_tool_calls(delta_tool_calls, tool_call_tasks)
+        self._send_delta_to_listener(delta)
+
+    def _start_tool_calls(
+        self,
+        tool_calls: list[llm.ToolInput],
+        tool_call_tasks: dict[str, asyncio.Task],
+    ) -> None:
+        """Start the tool calls that Home Assistant has to run."""
+        for tool_call in tool_calls:
+            if not tool_call.external:
+                if self.llm_api is None:
+                    raise ValueError("No LLM API configured")
+
+                tool_call_tasks[tool_call.id] = self.hass.async_create_task(
+                    self.llm_api.async_call_tool(tool_call),
+                    name=f"llm_tool_{tool_call.id}",
+                )
+
+    def _send_delta_to_listener(
+        self, delta: AssistantContentDeltaDict | ToolResultContentDeltaDict
+    ) -> None:
+        """Send a delta to the delta listener, without the native content."""
+        if self.delta_listener:
+            if filtered_delta := {k: v for k, v in delta.items() if k != "native"}:
+                # We do not want to send the native content to the listener
+                # as it is not JSON serializable
+                self.delta_listener(self, filtered_delta)
+
+    def _add_tool_result(self, content: ToolResultContent) -> None:
+        """Send a tool result to the delta listener and add it to the chat log."""
+        if self.delta_listener:
+            self.delta_listener(self, asdict(content))
+        self.async_add_assistant_content_without_tools(content)
+
+    async def _async_add_pending_message(
+        self,
+        agent_id: str,
+        message: _PendingAssistantMessage,
+        tool_call_tasks: dict[str, asyncio.Task],
+    ) -> AsyncGenerator[AssistantContent | ToolResultContent]:
+        """Add a received message to the chat log and yield it and its tool results."""
+        content = message.as_content(agent_id)
+        yield content
+        async for tool_result in self.async_add_assistant_content(
+            content, tool_call_tasks=tool_call_tasks
+        ):
+            yield tool_result
+            if self.delta_listener:
+                self.delta_listener(self, asdict(tool_result))
 
     async def _async_expand_prompt_template(
         self,

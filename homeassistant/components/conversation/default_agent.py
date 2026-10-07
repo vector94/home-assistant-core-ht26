@@ -654,7 +654,7 @@ class DefaultAgent(ConversationEntity):
         except intent.MatchFailedError as match_error:
             # Intent was valid, but no entities matched the constraints.
             error_response_type, error_response_args = _get_match_error_response(
-                self.hass, match_error
+                match_error
             )
             intent_response = _make_error_result(
                 language,
@@ -1760,7 +1760,6 @@ def _get_unmatched_response(result: RecognizeResult) -> tuple[ErrorKey, dict[str
 
 
 def _get_match_error_response(
-    hass: HomeAssistant,
     match_error: intent.MatchFailedError,
 ) -> tuple[ErrorKey, dict[str, Any]]:
     """Return key and template arguments for error when target matching fails."""
@@ -1773,51 +1772,14 @@ def _get_match_error_response(
         in (intent.MatchFailedReason.DEVICE_CLASS, intent.MatchFailedReason.DOMAIN)
     ) and constraints.device_classes:
         device_class = next(iter(constraints.device_classes))  # first device class
-        if constraints.area_name:
-            # device_class in area
-            return ErrorKey.NO_DEVICE_CLASS_IN_AREA, {
-                "device_class": device_class,
-                "area": constraints.area_name,
-            }
-
-        # device_class only
-        return ErrorKey.NO_DEVICE_CLASS, {"device_class": device_class}
+        return _get_device_class_error(device_class, constraints)
 
     if (reason is intent.MatchFailedReason.DOMAIN) and constraints.domains:
         domain = next(iter(constraints.domains))  # first domain
-        if constraints.area_name:
-            # domain in area
-            return ErrorKey.NO_DOMAIN_IN_AREA, {
-                "domain": domain,
-                "area": constraints.area_name,
-            }
-
-        if constraints.floor_name:
-            # domain in floor
-            return ErrorKey.NO_DOMAIN_IN_FLOOR, {
-                "domain": domain,
-                "floor": constraints.floor_name,
-            }
-
-        # domain only
-        return ErrorKey.NO_DOMAIN, {"domain": domain}
+        return _get_domain_error(domain, constraints)
 
     if reason is intent.MatchFailedReason.DUPLICATE_NAME:
-        if constraints.floor_name:
-            # duplicate on floor
-            return ErrorKey.DUPLICATE_ENTITIES_IN_FLOOR, {
-                "entity": result.no_match_name,
-                "floor": constraints.floor_name,
-            }
-
-        if constraints.area_name:
-            # duplicate on area
-            return ErrorKey.DUPLICATE_ENTITIES_IN_AREA, {
-                "entity": result.no_match_name,
-                "area": constraints.area_name,
-            }
-
-        return ErrorKey.DUPLICATE_ENTITIES, {"entity": result.no_match_name}
+        return _get_duplicate_name_error(result.no_match_name, constraints)
 
     if reason is intent.MatchFailedReason.INVALID_AREA:
         # Invalid area name
@@ -1840,48 +1802,116 @@ def _get_match_error_response(
 
     if reason is intent.MatchFailedReason.ASSISTANT:
         # Not exposed
-        if constraints.name:
-            if constraints.area_name:
-                return ErrorKey.NO_ENTITY_IN_AREA_EXPOSED, {
-                    "entity": constraints.name,
-                    "area": constraints.area_name,
-                }
-            if constraints.floor_name:
-                return ErrorKey.NO_ENTITY_IN_FLOOR_EXPOSED, {
-                    "entity": constraints.name,
-                    "floor": constraints.floor_name,
-                }
-            return ErrorKey.NO_ENTITY_EXPOSED, {"entity": constraints.name}
+        return _get_not_exposed_error(constraints)
 
-        if constraints.device_classes:
-            device_class = next(iter(constraints.device_classes))
+    # Default error
+    return ErrorKey.NO_INTENT, {}
 
-            if constraints.area_name:
-                return ErrorKey.NO_DEVICE_CLASS_IN_AREA_EXPOSED, {
-                    "device_class": device_class,
-                    "area": constraints.area_name,
-                }
-            if constraints.floor_name:
-                return ErrorKey.NO_DEVICE_CLASS_IN_FLOOR_EXPOSED, {
-                    "device_class": device_class,
-                    "floor": constraints.floor_name,
-                }
-            return ErrorKey.NO_DEVICE_CLASS_EXPOSED, {"device_class": device_class}
 
-        if constraints.domains:
-            domain = next(iter(constraints.domains))
+def _get_device_class_error(
+    device_class: str, constraints: intent.MatchTargetsConstraints
+) -> tuple[ErrorKey, dict[str, Any]]:
+    """Return the error when no entity with the device class matches."""
+    if constraints.area_name:
+        # device_class in area
+        return ErrorKey.NO_DEVICE_CLASS_IN_AREA, {
+            "device_class": device_class,
+            "area": constraints.area_name,
+        }
 
-            if constraints.area_name:
-                return ErrorKey.NO_DOMAIN_IN_AREA_EXPOSED, {
-                    "domain": domain,
-                    "area": constraints.area_name,
-                }
-            if constraints.floor_name:
-                return ErrorKey.NO_DOMAIN_IN_FLOOR_EXPOSED, {
-                    "domain": domain,
-                    "floor": constraints.floor_name,
-                }
-            return ErrorKey.NO_DOMAIN_EXPOSED, {"domain": domain}
+    # device_class only
+    return ErrorKey.NO_DEVICE_CLASS, {"device_class": device_class}
+
+
+def _get_domain_error(
+    domain: str, constraints: intent.MatchTargetsConstraints
+) -> tuple[ErrorKey, dict[str, Any]]:
+    """Return the error when no entity in the domain matches."""
+    if constraints.area_name:
+        # domain in area
+        return ErrorKey.NO_DOMAIN_IN_AREA, {
+            "domain": domain,
+            "area": constraints.area_name,
+        }
+
+    if constraints.floor_name:
+        # domain in floor
+        return ErrorKey.NO_DOMAIN_IN_FLOOR, {
+            "domain": domain,
+            "floor": constraints.floor_name,
+        }
+
+    # domain only
+    return ErrorKey.NO_DOMAIN, {"domain": domain}
+
+
+def _get_duplicate_name_error(
+    name: str | None, constraints: intent.MatchTargetsConstraints
+) -> tuple[ErrorKey, dict[str, Any]]:
+    """Return the error when more than one entity has the same name."""
+    if constraints.floor_name:
+        # duplicate on floor
+        return ErrorKey.DUPLICATE_ENTITIES_IN_FLOOR, {
+            "entity": name,
+            "floor": constraints.floor_name,
+        }
+
+    if constraints.area_name:
+        # duplicate on area
+        return ErrorKey.DUPLICATE_ENTITIES_IN_AREA, {
+            "entity": name,
+            "area": constraints.area_name,
+        }
+
+    return ErrorKey.DUPLICATE_ENTITIES, {"entity": name}
+
+
+def _get_not_exposed_error(
+    constraints: intent.MatchTargetsConstraints,
+) -> tuple[ErrorKey, dict[str, Any]]:
+    """Return the error when the matching entities are not exposed."""
+    if constraints.name:
+        if constraints.area_name:
+            return ErrorKey.NO_ENTITY_IN_AREA_EXPOSED, {
+                "entity": constraints.name,
+                "area": constraints.area_name,
+            }
+        if constraints.floor_name:
+            return ErrorKey.NO_ENTITY_IN_FLOOR_EXPOSED, {
+                "entity": constraints.name,
+                "floor": constraints.floor_name,
+            }
+        return ErrorKey.NO_ENTITY_EXPOSED, {"entity": constraints.name}
+
+    if constraints.device_classes:
+        device_class = next(iter(constraints.device_classes))
+
+        if constraints.area_name:
+            return ErrorKey.NO_DEVICE_CLASS_IN_AREA_EXPOSED, {
+                "device_class": device_class,
+                "area": constraints.area_name,
+            }
+        if constraints.floor_name:
+            return ErrorKey.NO_DEVICE_CLASS_IN_FLOOR_EXPOSED, {
+                "device_class": device_class,
+                "floor": constraints.floor_name,
+            }
+        return ErrorKey.NO_DEVICE_CLASS_EXPOSED, {"device_class": device_class}
+
+    if constraints.domains:
+        domain = next(iter(constraints.domains))
+
+        if constraints.area_name:
+            return ErrorKey.NO_DOMAIN_IN_AREA_EXPOSED, {
+                "domain": domain,
+                "area": constraints.area_name,
+            }
+        if constraints.floor_name:
+            return ErrorKey.NO_DOMAIN_IN_FLOOR_EXPOSED, {
+                "domain": domain,
+                "floor": constraints.floor_name,
+            }
+        return ErrorKey.NO_DOMAIN_EXPOSED, {"domain": domain}
 
     # Default error
     return ErrorKey.NO_INTENT, {}

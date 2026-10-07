@@ -1294,16 +1294,8 @@ class PipelineRun:
 
                 else:
                     # Fall back to pipeline conversation agent
-                    conversation_result = await conversation.async_converse(
-                        hass=self.hass,
-                        text=user_input.text,
-                        conversation_id=user_input.conversation_id,
-                        device_id=user_input.device_id,
-                        satellite_id=user_input.satellite_id,
-                        context=user_input.context,
-                        language=user_input.language,
-                        agent_id=user_input.agent_id,
-                        extra_system_prompt=user_input.extra_system_prompt,
+                    conversation_result = await conversation.async_converse_input(
+                        self.hass, user_input
                     )
                     speech = conversation_result.response.speech.get("plain", {}).get(
                         "speech", ""

@@ -14,6 +14,7 @@ from openai.types.responses import (
 )
 import voluptuous as vol
 
+from homeassistant.components.conversation import async_move_agent_to_subentry
 from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.const import CONF_API_KEY, CONF_PROMPT, Platform
 from homeassistant.core import (
@@ -36,7 +37,7 @@ from homeassistant.helpers import (
     selector,
 )
 from homeassistant.helpers.httpx_client import get_async_client
-from homeassistant.helpers.typing import UNDEFINED, ConfigType, UndefinedType
+from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CONF_CHAT_MODEL,
@@ -327,8 +328,6 @@ async def async_migrate_integration(hass: HomeAssistant) -> None:
         return
 
     api_keys_entries: dict[str, tuple[OpenAIConfigEntry, bool]] = {}
-    entity_registry = er.async_get(hass)
-    device_registry = dr.async_get(hass)
 
     for entry in entries:
         use_existing = False
@@ -350,55 +349,7 @@ async def async_migrate_integration(hass: HomeAssistant) -> None:
         parent_entry, all_disabled = api_keys_entries[entry.data[CONF_API_KEY]]
 
         hass.config_entries.async_add_subentry(parent_entry, subentry)
-        conversation_entity_id = entity_registry.async_get_entity_id(
-            "conversation",
-            DOMAIN,
-            entry.entry_id,
-        )
-        device = device_registry.async_get_device_by_identifier(
-            (DOMAIN, entry.entry_id), entry.entry_id
-        )
-
-        if conversation_entity_id is not None:
-            conversation_entity_entry = entity_registry.entities[conversation_entity_id]
-            entity_disabled_by = conversation_entity_entry.disabled_by
-            if (
-                entity_disabled_by is er.RegistryEntryDisabler.CONFIG_ENTRY
-                and not all_disabled
-            ):
-                # Device and entity registries will set the disabled_by flag to None
-                # when moving a device or entity disabled by CONFIG_ENTRY to an enabled
-                # config entry, but we want to set it to DEVICE or USER instead,
-                entity_disabled_by = (
-                    er.RegistryEntryDisabler.DEVICE
-                    if device
-                    else er.RegistryEntryDisabler.USER
-                )
-            entity_registry.async_update_entity(
-                conversation_entity_id,
-                config_entry_id=parent_entry.entry_id,
-                config_subentry_id=subentry.subentry_id,
-                disabled_by=entity_disabled_by,
-                new_unique_id=subentry.subentry_id,
-            )
-
-        if device is not None:
-            # Device and entity registries will set the disabled_by flag to None
-            # when moving a device or entity disabled by CONFIG_ENTRY to an enabled
-            # config entry, but we want to set it to USER instead,
-            device_disabled_by: dr.DeviceEntryDisabler | UndefinedType = UNDEFINED
-            if (
-                device.disabled_by is dr.DeviceEntryDisabler.CONFIG_ENTRY
-                and not all_disabled
-            ):
-                device_disabled_by = dr.DeviceEntryDisabler.USER
-            device_registry.async_update_device(
-                device.id,
-                disabled_by=device_disabled_by,
-                new_identifiers={(DOMAIN, subentry.subentry_id)},
-                new_config_entry_id=parent_entry.entry_id,
-                new_config_subentry_id=subentry.subentry_id,
-            )
+        async_move_agent_to_subentry(hass, entry, parent_entry, subentry, all_disabled)
 
         if not use_existing:
             await hass.config_entries.async_remove(entry.entry_id)
