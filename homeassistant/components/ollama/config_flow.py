@@ -45,24 +45,36 @@ from homeassistant.util.ssl import get_default_context
 
 from . import OllamaConfigEntry
 from .const import (
+    CONF_EMBEDDING_MODEL,
     CONF_KEEP_ALIVE,
     CONF_MAX_HISTORY,
+    CONF_MEMORY,
+    CONF_MEMORY_LIMIT,
     CONF_NUM_CTX,
     CONF_THINK,
     DEFAULT_AI_TASK_NAME,
     DEFAULT_CONVERSATION_NAME,
+    DEFAULT_EMBEDDING_MODEL,
     DEFAULT_KEEP_ALIVE,
     DEFAULT_MAX_HISTORY,
+    DEFAULT_MEMORY_LIMIT,
     DEFAULT_MODEL,
     DEFAULT_NUM_CTX,
     DEFAULT_THINK,
     DEFAULT_TIMEOUT,
     DOMAIN,
+    EMBEDDING_MODEL_NAMES,
+    MAX_MEMORY_LIMIT,
+    MIN_MEMORY_LIMIT,
     MIN_NUM_CTX,
     MODEL_NAMES,
 )
+from .rag.memory import ChatMemory
 
 _LOGGER = logging.getLogger(__name__)
+
+# Loading the embedding model for the first time can take a while.
+EMBEDDING_CHECK_TIMEOUT = 60
 
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
@@ -235,7 +247,7 @@ class OllamaConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> dict[str, type[ConfigSubentryFlow]]:
         """Return subentries supported by this integration."""
         return {
-            "conversation": OllamaSubentryFlowHandler,
+            "conversation": OllamaConversationSubentryFlowHandler,
             "ai_task_data": OllamaSubentryFlowHandler,
         }
 
@@ -314,6 +326,7 @@ class OllamaSubentryFlowHandler(ConfigSubentryFlow):
         self._model = user_input[CONF_MODEL]
         if self._is_new:
             self._name = user_input.pop(CONF_NAME)
+        self._config_data = user_input
 
         # Check if model needs to be downloaded
         try:
@@ -325,26 +338,13 @@ class OllamaSubentryFlowHandler(ConfigSubentryFlow):
             }
 
             if self._model not in currently_downloaded_models:
-                # Store the user input to use after download
-                self._config_data = user_input
                 # Ollama server needs to download model first
                 return await self.async_step_download()
         except Exception:
             _LOGGER.exception("Failed to check model availability")
             return self.async_abort(reason="cannot_connect")
 
-        # Model is already downloaded, create/update the entry
-        if self._is_new:
-            return self.async_create_entry(
-                title=self._name,
-                data=user_input,
-            )
-
-        return self.async_update_and_abort(
-            self._get_entry(),
-            self._get_reconfigure_subentry(),
-            data=user_input,
-        )
+        return await self.async_step_finish()
 
     async def async_step_download(
         self, user_input: dict[str, Any] | None = None
@@ -383,10 +383,8 @@ class OllamaSubentryFlowHandler(ConfigSubentryFlow):
     async def async_step_finish(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Step after model downloading has succeeded."""
+        """Save the agent once its models are ready."""
         assert self._config_data is not None
-
-        # Model download completed, create/update the entry with stored config
         if self._is_new:
             return self.async_create_entry(
                 title=self._name,
@@ -400,6 +398,241 @@ class OllamaSubentryFlowHandler(ConfigSubentryFlow):
 
     async_step_user = async_step_set_options
     async_step_reconfigure = async_step_set_options
+
+
+class OllamaConversationSubentryFlowHandler(OllamaSubentryFlowHandler):
+    """Flow for managing Ollama conversation agents, which can have memory."""
+
+    def __init__(self) -> None:
+        """Initialize the subentry flow."""
+        super().__init__()
+        self._embedding_model: str | None = None
+        self._embedding_download_task: asyncio.Task | None = None
+        self._memory_ready = False
+        self._memory_update: ChatMemory | None = None
+        self._recalculate_task: asyncio.Task[int] | None = None
+        self._memory_errors: dict[str, str] | None = None
+
+    @override
+    async def async_step_set_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle model selection and configuration step."""
+        if user_input is not None and not self._is_new:
+            # Keep the memory choices for when memory is switched back on.
+            previous = self._get_reconfigure_subentry().data
+            for key in (CONF_EMBEDDING_MODEL, CONF_MEMORY_LIMIT):
+                if key in previous:
+                    user_input.setdefault(key, previous[key])
+        return await super().async_step_set_options(user_input)
+
+    async def async_step_memory(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose the embedding model and how many messages to remember."""
+        assert self._config_data is not None
+        # Coming back here after a progress step passes an empty input.
+        if not user_input:
+            errors, self._memory_errors = self._memory_errors, None
+            return await self._async_show_memory_form(errors)
+
+        self._embedding_model = _with_tag(user_input[CONF_EMBEDDING_MODEL])
+        self._embedding_download_task = None
+        self._recalculate_task = None
+        self._config_data[CONF_EMBEDDING_MODEL] = self._embedding_model
+        self._config_data[CONF_MEMORY_LIMIT] = int(user_input[CONF_MEMORY_LIMIT])
+        try:
+            async with asyncio.timeout(DEFAULT_TIMEOUT):
+                response = await self._client.list()
+        except TimeoutError, httpx.HTTPError, ConnectionError:
+            _LOGGER.exception(
+                "Failed to check the embedding model on the Ollama server"
+            )
+            return self.async_abort(reason="cannot_connect")
+
+        if self._embedding_model not in {
+            model_info["model"] for model_info in response.get("models", [])
+        }:
+            return await self.async_step_download_embedding()
+        return await self.async_step_check_embedding()
+
+    async def _async_show_memory_form(
+        self, errors: dict[str, str] | None = None
+    ) -> SubentryFlowResult:
+        """Show the memory form with the embedding models to choose from."""
+        assert self._config_data is not None
+        try:
+            models_to_list = await self._async_embedding_models()
+        except TimeoutError, httpx.HTTPError, ConnectionError:
+            _LOGGER.exception("Failed to list embedding models on the Ollama server")
+            return self.async_abort(reason="cannot_connect")
+
+        return self.async_show_form(
+            step_id="memory",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_EMBEDDING_MODEL,
+                        description={
+                            "suggested_value": self._config_data.get(
+                                CONF_EMBEDDING_MODEL, DEFAULT_EMBEDDING_MODEL
+                            )
+                        },
+                    ): SelectSelector(
+                        SelectSelectorConfig(options=models_to_list, custom_value=True)
+                    ),
+                    vol.Required(
+                        CONF_MEMORY_LIMIT,
+                        description={
+                            "suggested_value": self._config_data.get(
+                                CONF_MEMORY_LIMIT, DEFAULT_MEMORY_LIMIT
+                            )
+                        },
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=MIN_MEMORY_LIMIT,
+                            max=MAX_MEMORY_LIMIT,
+                            step=1,
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def _async_embedding_models(self) -> list[SelectOptionDict]:
+        """List downloaded embedding models first, then known ones to download."""
+        async with asyncio.timeout(DEFAULT_TIMEOUT):
+            response = await self._client.list()
+            names = sorted(
+                model_info["model"] for model_info in response.get("models", [])
+            )
+            details = await asyncio.gather(
+                *(self._client.show(name) for name in names), return_exceptions=True
+            )
+        downloaded = [
+            name
+            for name, info in zip(names, details, strict=True)
+            if _is_embedding_model(name, info)
+        ]
+        return [
+            SelectOptionDict(label=f"{name} (downloaded)", value=name)
+            for name in downloaded
+        ] + [
+            SelectOptionDict(label=name, value=f"{name}:latest")
+            for name in EMBEDDING_MODEL_NAMES
+            if f"{name}:latest" not in downloaded
+        ]
+
+    async def async_step_download_embedding(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Step to wait for Ollama server to download the embedding model."""
+        assert self._embedding_model is not None
+
+        if self._embedding_download_task is None:
+            self._embedding_download_task = self.hass.async_create_background_task(
+                self._client.pull(self._embedding_model),
+                f"Downloading {self._embedding_model}",
+            )
+
+        if not self._embedding_download_task.done():
+            return self.async_show_progress(
+                step_id="download_embedding",
+                progress_action="download_embedding",
+                progress_task=self._embedding_download_task,
+            )
+
+        try:
+            await self._embedding_download_task
+        except Exception:
+            _LOGGER.exception("Unexpected error while downloading model")
+            return self.async_show_progress_done(next_step_id="failed")
+        return self.async_show_progress_done(next_step_id="check_embedding")
+
+    async def async_step_check_embedding(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Check that the chosen model can create embeddings."""
+        assert self._config_data is not None
+        assert self._embedding_model is not None
+        try:
+            async with asyncio.timeout(EMBEDDING_CHECK_TIMEOUT):
+                await self._client.embed(model=self._embedding_model, input="test")
+        except ollama.RequestError, ollama.ResponseError:
+            return await self._async_show_memory_form({"base": "embedding_failed"})
+        except TimeoutError, httpx.HTTPError, ConnectionError:
+            return await self._async_show_memory_form({"base": "cannot_connect"})
+        self._memory_ready = True
+
+        if not self._is_new:
+            memory = ChatMemory(
+                self.hass,
+                self._client,
+                self._get_reconfigure_subentry().subentry_id,
+                self._embedding_model,
+                self._config_data[CONF_MEMORY_LIMIT],
+            )
+            if await memory.async_count_stale():
+                self._memory_update = memory
+                return await self.async_step_recalculate()
+        return await self.async_step_finish()
+
+    async def async_step_recalculate(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Step to wait while saved messages are embedded with the new model."""
+        assert self._memory_update is not None
+
+        if self._recalculate_task is None:
+            self._recalculate_task = self.hass.async_create_background_task(
+                self._memory_update.async_recalculate(self.async_update_progress),
+                "Updating Ollama memories",
+            )
+
+        if not self._recalculate_task.done():
+            return self.async_show_progress(
+                step_id="recalculate",
+                progress_action="recalculate",
+                progress_task=self._recalculate_task,
+            )
+
+        try:
+            await self._recalculate_task
+        except Exception:
+            _LOGGER.exception("Could not update the saved messages")
+            # Back to the memory screen: nothing is saved and the user can retry.
+            self._memory_errors = {"base": "recalculate_failed"}
+            self._memory_ready = False
+            return self.async_show_progress_done(next_step_id="memory")
+        return self.async_show_progress_done(next_step_id="finish")
+
+    @override
+    async def async_step_finish(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Ask for the memory settings first when memory is switched on."""
+        assert self._config_data is not None
+        if self._config_data.get(CONF_MEMORY) and not self._memory_ready:
+            return await self.async_step_memory()
+        return await super().async_step_finish(user_input)
+
+    async_step_user = async_step_set_options
+    async_step_reconfigure = async_step_set_options
+
+
+def _with_tag(model: str) -> str:
+    """Return the model name with a tag, as Ollama lists downloaded models."""
+    return model if ":" in model else f"{model}:latest"
+
+
+def _is_embedding_model(name: str, info: ollama.ShowResponse | BaseException) -> bool:
+    """Return if a downloaded model can create embeddings."""
+    if isinstance(info, ollama.ShowResponse) and info.capabilities:
+        return "embedding" in info.capabilities
+    # Older Ollama servers don't report capabilities.
+    return name.partition(":")[0] in EMBEDDING_MODEL_NAMES
 
 
 def filter_invalid_llm_apis(hass: HomeAssistant, selected_apis: list[str]) -> list[str]:
@@ -518,5 +751,12 @@ def ollama_config_option_schema(
             ): BooleanSelector(),
         }
     )
+    if subentry_type == "conversation":
+        schema[
+            vol.Optional(
+                CONF_MEMORY,
+                description={"suggested_value": options.get(CONF_MEMORY, False)},
+            )
+        ] = BooleanSelector()
 
     return schema

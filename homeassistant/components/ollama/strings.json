@@ -73,22 +73,48 @@
         "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]"
       },
       "entry_type": "Conversation agent",
+      "error": {
+        "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+        "embedding_failed": "This model can't create embeddings. Choose an embedding model, for example nomic-embed-text.",
+        "recalculate_failed": "Updating the saved messages failed. Check that the Ollama server is running and try again."
+      },
       "initiate_flow": {
         "reconfigure": "Reconfigure conversation agent",
         "user": "Add conversation agent"
       },
       "progress": {
-        "download": "Please wait while the model is downloaded, which may take a very long time. Check your Ollama server logs for more details."
+        "download": "Please wait while the model is downloaded, which may take a very long time. Check your Ollama server logs for more details.",
+        "download_embedding": "Please wait while the embedding model is downloaded. Check your Ollama server logs for more details.",
+        "recalculate": "Please wait while every saved message is updated for the new embedding model."
       },
       "step": {
         "download": {
           "title": "Downloading model"
+        },
+        "download_embedding": {
+          "title": "Downloading embedding model"
+        },
+        "memory": {
+          "data": {
+            "embedding_model": "Embedding model",
+            "memory_limit": "Messages to remember per person"
+          },
+          "data_description": {
+            "embedding_model": "The Ollama model used to find related messages. It is downloaded automatically if your Ollama server doesn't have it yet. Changing it later updates all saved messages.",
+            "memory_limit": "When someone has more saved messages than this, their oldest ones are forgotten."
+          },
+          "description": "The assistant remembers what each person says in the chat, together with its replies, and brings up the relevant parts in later chats. Everyone only gets their own memories, and voice messages are never saved.",
+          "title": "Long-term memory"
+        },
+        "recalculate": {
+          "title": "Updating saved messages"
         },
         "set_options": {
           "data": {
             "keep_alive": "Keep alive",
             "llm_hass_api": "[%key:common::config_flow::data::llm_hass_api%]",
             "max_history": "Max history messages",
+            "memory": "Enable memory",
             "model": "Model",
             "name": "[%key:common::config_flow::data::name%]",
             "num_ctx": "Context window size",
@@ -97,6 +123,7 @@
           },
           "data_description": {
             "keep_alive": "Duration in seconds for Ollama to keep model in memory. -1 = indefinite, 0 = never.",
+            "memory": "Remember each person's chat messages across conversations. You choose the embedding model on the next screen.",
             "num_ctx": "Maximum number of text tokens the model can process. Lower to reduce Ollama RAM, or increase for a large number of exposed entities.",
             "prompt": "Instruct how the LLM should respond. This can be a template.",
             "think": "If enabled, the LLM will think before responding. This can improve response quality but may increase latency."

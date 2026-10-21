@@ -1759,6 +1759,7 @@ numato-gpio==0.13.0
 
 # homeassistant.components.compensation
 # homeassistant.components.iqvia
+# homeassistant.components.ollama
 # homeassistant.components.stream
 # homeassistant.components.trend
 numpy==2.3.2

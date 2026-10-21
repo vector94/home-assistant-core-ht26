@@ -288,7 +288,7 @@ class OllamaBaseLLMEntity(Entity):
         up in the context window.
 
         Note that some messages in the history may not be from ollama only, and
-        may come from other anents, so the assumptions here may not strictly hold,
+        may come from other agents, so the assumptions here may not strictly hold,
         but generally should be effective.
         """
         if max_messages < 1:

@@ -22,6 +22,24 @@ DEFAULT_MAX_HISTORY = 20
 
 MAX_HISTORY_SECONDS = 60 * 60  # 1 hour
 
+CONF_MEMORY = "memory"
+CONF_EMBEDDING_MODEL = "embedding_model"
+CONF_MEMORY_LIMIT = "memory_limit"
+DEFAULT_EMBEDDING_MODEL = "nomic-embed-text:latest"
+DEFAULT_MEMORY_LIMIT = 300
+MIN_MEMORY_LIMIT = 1
+MAX_MEMORY_LIMIT = 10000
+MEMORY_TOP_K = 3
+MEMORY_MIN_SCORE = 0.6
+
+EMBEDDING_MODEL_NAMES = [  # https://ollama.com/search?c=embedding
+    "all-minilm",
+    "bge-m3",
+    "mxbai-embed-large",
+    "nomic-embed-text",
+    "snowflake-arctic-embed",
+]
+
 MODEL_NAMES = [  # https://ollama.com/library
     "alfred",
     "all-minilm",

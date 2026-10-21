@@ -40,6 +40,7 @@ from .const import (
     DEFAULT_TIMEOUT,
     DOMAIN,
 )
+from .rag.memory import remove_orphaned_memories
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,6 +99,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: OllamaConfigEntry) -> bo
         raise ConfigEntryNotReady(err) from err
 
     entry.runtime_data = client
+
+    await hass.async_add_executor_job(
+        remove_orphaned_memories,
+        hass,
+        {
+            subentry_id
+            for ollama_entry in hass.config_entries.async_entries(DOMAIN)
+            for subentry_id in ollama_entry.subentries
+        },
+    )
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     entry.async_on_unload(entry.add_update_listener(async_update_options))

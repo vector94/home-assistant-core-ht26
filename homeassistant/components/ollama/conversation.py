@@ -9,8 +9,18 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import OllamaConfigEntry
-from .const import DOMAIN
+from .const import (
+    CONF_EMBEDDING_MODEL,
+    CONF_MAX_HISTORY,
+    CONF_MEMORY,
+    CONF_MEMORY_LIMIT,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_MAX_HISTORY,
+    DEFAULT_MEMORY_LIMIT,
+    DOMAIN,
+)
 from .entity import OllamaBaseLLMEntity
+from .rag.memory import ChatMemory
 
 
 async def async_setup_entry(
@@ -45,12 +55,31 @@ class OllamaConversationEntity(
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
+        self._memory: ChatMemory | None = None
 
     @override
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
         await super().async_added_to_hass()
         conversation.async_set_agent(self.hass, self.entry, self)
+
+        if not self.subentry.data.get(CONF_MEMORY):
+            return
+        memory = ChatMemory(
+            self.hass,
+            self.entry.runtime_data,
+            self.subentry.subentry_id,
+            self.subentry.data.get(CONF_EMBEDDING_MODEL, DEFAULT_EMBEDDING_MODEL),
+            int(self.subentry.data.get(CONF_MEMORY_LIMIT, DEFAULT_MEMORY_LIMIT)),
+            int(self.subentry.data.get(CONF_MAX_HISTORY, DEFAULT_MAX_HISTORY)),
+        )
+        if await memory.async_setup():
+            self._memory = memory
+            self.entry.async_create_background_task(
+                self.hass,
+                memory.async_update_leftovers(),
+                f"Update memories of {self.entity_id}",
+            )
 
     @override
     async def async_will_remove_from_hass(self) -> None:
@@ -73,16 +102,48 @@ class OllamaConversationEntity(
         """Call the API."""
         settings = {**self.entry.data, **self.subentry.data}
 
+        memory = self._memory
+        # Voice satellites can't tell who is speaking, so memory is chat-only.
+        user_id = (
+            user_input.context.user_id if user_input.satellite_id is None else None
+        )
+
+        extra_system_prompt = user_input.extra_system_prompt
+        if memory and user_id:
+            extra_system_prompt = "\n\n".join(
+                filter(
+                    None,
+                    [
+                        extra_system_prompt,
+                        await memory.async_build_prompt(
+                            user_id, chat_log.conversation_id, user_input.text
+                        ),
+                    ],
+                )
+            )
+
         try:
             await chat_log.async_provide_llm_data(
                 user_input.as_llm_context(DOMAIN),
                 settings.get(CONF_LLM_HASS_API),
                 settings.get(CONF_PROMPT),
-                user_input.extra_system_prompt,
+                extra_system_prompt,
             )
         except conversation.ConverseError as err:
             return err.as_conversation_result()
 
         await self._async_handle_chat_log(chat_log)
+
+        if (
+            memory
+            and user_id
+            and isinstance(reply := chat_log.content[-1], conversation.AssistantContent)
+            and reply.content
+        ):
+            await memory.async_remember(
+                user_id,
+                chat_log.conversation_id,
+                f"User: {user_input.text}\nAssistant: {reply.content}",
+            )
 
         return conversation.async_get_result_from_chat_log(user_input, chat_log)
