@@ -469,7 +469,7 @@ async def test_intent_timeout(
         await asyncio.sleep(3600)
 
     with patch(
-        "homeassistant.components.conversation.async_converse",
+        "homeassistant.components.conversation.async_converse_input",
         new=sleepy_converse,
     ):
         await client.send_json_auto_id(
@@ -591,7 +591,7 @@ async def test_intent_failed(
     client = await hass_ws_client(hass)
 
     with patch(
-        "homeassistant.components.conversation.async_converse",
+        "homeassistant.components.conversation.async_converse_input",
         side_effect=RuntimeError,
     ):
         await client.send_json_auto_id(
@@ -2679,7 +2679,7 @@ async def test_intent_progress_event(
     """Test intent-progress events from a pipeline are forwarded."""
     client = await hass_ws_client(hass)
 
-    orig_converse = conversation.async_converse
+    orig_converse_input = conversation.async_converse_input
     expected_delta_events = [
         {"chat_log_delta": {"role": "assistant"}},
         {"chat_log_delta": {"content": "Hello"}},
@@ -2690,11 +2690,13 @@ async def test_intent_progress_event(
         for d in expected_delta_events:
             yield d["chat_log_delta"]
 
-    async def mock_converse(**kwargs):
+    async def mock_converse_input(
+        hass: HomeAssistant, conversation_input: conversation.ConversationInput
+    ) -> conversation.ConversationResult:
         """Mock converse method."""
         with (
             chat_session.async_get_chat_session(
-                kwargs["hass"], kwargs["conversation_id"]
+                hass, conversation_input.conversation_id
             ) as session,
             conversation.async_get_chat_log(hass, session) as chat_log,
         ):
@@ -2703,9 +2705,12 @@ async def test_intent_progress_event(
             ):
                 pass
 
-            return await orig_converse(**kwargs)
+            return await orig_converse_input(hass, conversation_input)
 
-    with patch("homeassistant.components.conversation.async_converse", mock_converse):
+    with patch(
+        "homeassistant.components.conversation.async_converse_input",
+        mock_converse_input,
+    ):
         await client.send_json_auto_id(
             {
                 "type": "assist_pipeline/run",

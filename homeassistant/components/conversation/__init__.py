@@ -26,6 +26,7 @@ from .agent_manager import (
     AgentInfo,
     agent_id_validator,
     async_converse,
+    async_converse_input,
     async_get_agent,
     get_agent_manager,
 )
@@ -60,7 +61,7 @@ from .entity import ConversationEntity
 from .http import async_setup as async_setup_conversation_http
 from .models import AbstractConversationAgent, ConversationInput, ConversationResult
 from .trace import ConversationTraceEventType, async_conversation_trace_append
-from .util import async_get_result_from_chat_log
+from .util import async_get_result_from_chat_log, async_move_agent_to_subentry
 
 __all__ = [
     "DOMAIN",
@@ -82,9 +83,11 @@ __all__ = [
     "UserContent",
     "async_conversation_trace_append",
     "async_converse",
+    "async_converse_input",
     "async_get_agent_info",
     "async_get_chat_log",
     "async_get_result_from_chat_log",
+    "async_move_agent_to_subentry",
     "async_set_agent",
     "async_unset_agent",
 ]
